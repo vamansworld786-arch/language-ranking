@@ -2,7 +2,7 @@ name: Star improved-spork reported repos
 
 on:
   schedule:
-   - cron: '51 19 * * *'  # Daily at 11:51 PM Oman time (19:51 UTC) 
+    - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       source_owner:
@@ -14,7 +14,7 @@ on:
         required: true
         default: 'improved-spork'
       artifact_prefix:
-        description: 'Artifact name prefix (default: python-project-report)'
+        description: 'Artifact name prefix'
         required: true
         default: 'python-project-report'
       max_repos:
@@ -22,7 +22,7 @@ on:
         required: true
         default: '10'
       dry_run:
-        description: 'If true, do not actually call the star API (useful for testing)'
+        description: 'If true, do not actually call the star API'
         required: true
         default: 'false'
 
@@ -35,46 +35,41 @@ permissions:
   actions: read
 
 jobs:
-  star:
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      LOG_DIR: logs
     steps:
-      - name: Checkout (not strictly required, but useful)
-        uses: actions/checkout@v4
-
       - name: Install dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq unzip python3 python3-venv python3-pip
+          sudo apt-get install -y jq unzip python3 python3-pip
 
-      - name: Validate STAR_TOKEN and show authenticated user
+      - name: Validate token 3 for artifact access
         env:
-          TOKEN: ${{ secrets.STAR_TOKEN }}
+          TOKEN: ${{ secrets.STAR_TOKEN_3 }}
         run: |
           if [ -z "$TOKEN" ]; then
-            echo "::error::Please create a PAT and set it as the STAR_TOKEN repository secret."
+            echo "::error::Missing secret STAR_TOKEN_3"
             exit 1
           fi
 
           USER_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/user")
           login=$(echo "$USER_JSON" | jq -r '.login // empty')
           if [ -z "$login" ]; then
-            echo "::error::STAR_TOKEN did not authenticate: $USER_JSON"
+            echo "::error::STAR_TOKEN_3 authentication failed."
             exit 1
           fi
-          echo "Authenticated as: $login"
+          echo "Using account: $login"
 
-      - name: Download latest artifact zip from source repo (by prefix)
+      - name: Download latest artifact zip from source repo
         env:
-          TOKEN: ${{ secrets.STAR_TOKEN }}
+          TOKEN: ${{ secrets.STAR_TOKEN_3 }}
           SOURCE_OWNER: ${{ inputs.source_owner }}
           SOURCE_REPO: ${{ inputs.source_repo }}
           PREFIX: ${{ inputs.artifact_prefix }}
         run: |
           set -euo pipefail
-          mkdir -p artifact "$LOG_DIR"
+          mkdir -p artifact
 
           ART_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$SOURCE_OWNER/$SOURCE_REPO/actions/artifacts")
 
@@ -82,36 +77,27 @@ jobs:
 
           if [ -z "$ART_ID" ] || [ "$ART_ID" = "null" ]; then
             echo "::error::No artifact found with prefix $PREFIX in $SOURCE_OWNER/$SOURCE_REPO"
-            echo "$ART_JSON" | jq -c '.artifacts' || true
             exit 1
           fi
 
-          echo "Found artifact id: $ART_ID"
           curl -L -H "Authorization: Bearer $TOKEN" -o artifact.zip "https://api.github.com/repos/$SOURCE_OWNER/$SOURCE_REPO/actions/artifacts/$ART_ID/zip"
-
           unzip -q artifact.zip -d artifact
-          echo "Artifact extracted to ./artifact"
 
-      - name: Extract owner/repo list from project-report.csv
+      - name: Extract repos list from project-report.csv
         env:
           MAX: ${{ inputs.max_repos }}
         run: |
           set -euo pipefail
-          # Ensure MAX has a sensible default if the input is empty
           MAX="${MAX:-10}"
 
           CSV=$(find artifact -type f -name 'project-report.csv' | head -n 1 || true)
           if [ -z "$CSV" ]; then
-            echo "::error::project-report.csv not found in the artifact"
-            find artifact -maxdepth 3 -type f -print
+            echo "::error::project-report.csv not found in artifact"
             exit 1
           fi
 
-          echo "Using CSV: $CSV"
           python3 - "$CSV" "$MAX" <<'PY' > repos_to_star.txt
-          import csv
-          import sys
-          import re
+          import csv, sys, re
 
           csvfile = sys.argv[1]
           max_repos = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else 10
@@ -127,7 +113,6 @@ jobs:
                   if not repo:
                       continue
 
-                  # normalize: allow full URL or owner/repo
                   if repo.startswith(("http://", "https://")):
                       m = re.match(r'https?://github\.com/([^/]+/[^/]+)', repo)
                       if m:
@@ -136,12 +121,10 @@ jobs:
                           continue
 
                   if '/' not in repo:
-                      # not in owner/repo form; skip
                       continue
 
                   repos.append(repo)
 
-          # dedupe while preserving order
           seen = set()
           unique = []
           for r in repos:
@@ -155,88 +138,95 @@ jobs:
 
           print("\n".join(final))
           PY
-          echo "Wrote repos_to_star.txt:"
+
+          echo "Repos to star:"
           cat repos_to_star.txt
 
-      - name: Upload repos list artifact (repos_to_star.txt)
+      - name: Upload repos list artifact
         uses: actions/upload-artifact@v4
         with:
           name: repos-to-star
           path: repos_to_star.txt
 
-      - name: Star repositories (with retries & logging)
-        env:
-          TOKEN: ${{ secrets.STAR_TOKEN }}
-          DRY: ${{ inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$LOG_DIR"
-          OUT="$LOG_DIR/star-$(date -u +"%Y%m%dT%H%M%SZ").log"
-          echo "Start: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" | tee -a "$OUT"
+  star:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        account: [1, 2, 3, 4, 5, 6]
+    timeout-minutes: 20
+    steps:
+      - name: Download repo list
+        uses: actions/download-artifact@v4
+        with:
+          name: repos-to-star
+          path: .
 
-          if [ ! -f repos_to_star.txt ]; then
-            echo "::error::repos_to_star.txt missing" | tee -a "$OUT"
+      - name: Validate current account token
+        env:
+          TOKEN: ${{ secrets[format('STAR_TOKEN_{0}', matrix.account)] }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Missing secret STAR_TOKEN_${{ matrix.account }}"
             exit 1
           fi
 
-          attempts_per_repo=3
+          USER_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/user")
+          login=$(echo "$USER_JSON" | jq -r '.login // empty')
+          if [ -z "$login" ]; then
+            echo "::error::STAR_TOKEN_${{ matrix.account }} did not authenticate"
+            exit 1
+          fi
+          echo "Account #${{ matrix.account }} authenticated as: $login"
+
+      - name: Star repositories
+        env:
+          TOKEN: ${{ secrets[format('STAR_TOKEN_{0}', matrix.account)] }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f repos_to_star.txt ]; then
+            echo "::error::repos_to_star.txt missing"
+            exit 1
+          fi
+
+          echo "Starting star run for account #${{ matrix.account }}"
 
           while IFS= read -r R; do
             R=$(echo "$R" | tr -d '\r')
             [ -z "$R" ] && continue
-            echo "----" | tee -a "$OUT"
-            echo "Repository: $R" | tee -a "$OUT"
 
             if ! echo "$R" | grep -qE '^[^/]+/[^/]+$'; then
-              echo "SKIP: repo not in owner/repo format: $R" | tee -a "$OUT"
+              echo "SKIP: repo not in owner/repo format: $R"
               continue
             fi
+
+            echo "Repository: $R"
 
             if [ "$DRY" = "true" ] || [ "$DRY" = "True" ]; then
-              echo "DRY RUN: would star $R" | tee -a "$OUT"
+              echo "DRY RUN: would star $R"
               continue
             fi
 
-            attempt=0
-            success=0
-            until [ $attempt -ge $attempts_per_repo ]; do
-              attempt=$((attempt+1))
-              echo "Attempt $attempt of $attempts_per_repo for $R" | tee -a "$OUT"
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/user/starred/$R" || echo "000")
+            STATUS=$(curl -s -o /tmp/star.out -w "%{http_code}" \
+              -X PUT \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/user/starred/$R" || echo "000")
 
-              echo "HTTP status: $STATUS" | tee -a "$OUT"
-
-              if [ "$STATUS" = "204" ] || [ "$STATUS" = "304" ]; then
-                echo "OK: $R (HTTP $STATUS)" | tee -a "$OUT"
-                success=1
-                break
-              elif [ "$STATUS" = "401" ] || [ "$STATUS" = "403" ]; then
-                echo "::error::Authentication/permission error starring $R (HTTP $STATUS)" | tee -a "$OUT"
-                break
-              else
-                echo "Non-success, will retry if attempts remain" | tee -a "$OUT"
-                sleep_seconds=$((attempt * 5))
-                echo "Sleeping $sleep_seconds seconds before retry" | tee -a "$OUT"
-                sleep $sleep_seconds
-              fi
-            done
-
-            if [ $success -ne 1 ]; then
-              echo "FAILED: $R after $attempts_per_repo attempts" | tee -a "$OUT"
+            if [ "$STATUS" = "204" ] || [ "$STATUS" = "304" ]; then
+              echo "OK: $R"
+            elif [ "$STATUS" = "401" ] || [ "$STATUS" = "403" ]; then
+              echo "::error::Permission/auth error for $R (HTTP $STATUS)"
+              cat /tmp/star.out || true
+              exit 1
+            else
+              echo "WARNING: HTTP $STATUS for $R"
+              cat /tmp/star.out || true
             fi
 
-            sleep 1
           done < repos_to_star.txt
 
-          echo "Finished: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" | tee -a "$OUT"
-
-      - name: Upload run logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: star-run-logs
-          path: logs
-
-      - name: Summary
-        if: always()
-        run: |
-          echo "Done. repos_to_star.txt and logs uploaded as artifacts."
+          echo "Finished account #${{ matrix.account }}"
