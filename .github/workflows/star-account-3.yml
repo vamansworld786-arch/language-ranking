@@ -1,8 +1,8 @@
-name: Star improved-spork reported repos
+name: Star improved-spork reported repos - Account 3
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '20 2 * * *'
   workflow_dispatch:
     inputs:
       source_owner:
@@ -27,7 +27,7 @@ on:
         default: 'false'
 
 concurrency:
-  group: star-reported-repos
+  group: star-reported-repos-account-3
   cancel-in-progress: false
 
 permissions:
@@ -44,7 +44,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq unzip python3 python3-pip
 
-      - name: Validate token 3 for artifact access
+      - name: Validate token for artifact access
         env:
           TOKEN: ${{ secrets.STAR_TOKEN_3 }}
         run: |
@@ -53,15 +53,16 @@ jobs:
             exit 1
           fi
 
-          USER_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/user")
+          USER_JSON=$(curl -sS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/user")
           login=$(echo "$USER_JSON" | jq -r '.login // empty')
           if [ -z "$login" ]; then
             echo "::error::STAR_TOKEN_3 authentication failed."
+            echo "$USER_JSON"
             exit 1
           fi
-          echo "Using account: $login"
+          echo "Artifact account: $login"
 
-      - name: Download latest artifact zip from source repo
+      - name: Download latest matching artifact zip from source repo
         env:
           TOKEN: ${{ secrets.STAR_TOKEN_3 }}
           SOURCE_OWNER: ${{ inputs.source_owner }}
@@ -71,16 +72,55 @@ jobs:
           set -euo pipefail
           mkdir -p artifact
 
-          ART_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$SOURCE_OWNER/$SOURCE_REPO/actions/artifacts")
+          python3 - "$TOKEN" "$SOURCE_OWNER" "$SOURCE_REPO" "$PREFIX" > artifact_id.txt <<'PY'
+          import json
+          import sys
+          import urllib.request
 
-          ART_ID=$(echo "$ART_JSON" | jq -r --arg prefix "$PREFIX" '[.artifacts[] | select(.name|startswith($prefix))] | sort_by(.updated_at) | last | .id')
+          token, owner, repo, prefix = sys.argv[1:5]
 
+          page = 1
+          artifacts = []
+          while True:
+              req = urllib.request.Request(
+                  f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts?per_page=100&page={page}",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "github-actions-workflow",
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  payload = json.load(resp)
+
+              items = payload.get("artifacts", [])
+              if not items:
+                  break
+              artifacts.extend(items)
+              if len(items) < 100:
+                  break
+              page += 1
+
+          matches = [a for a in artifacts if str(a.get("name", "")).startswith(prefix)]
+          if not matches:
+              raise SystemExit(f"No artifact found with prefix {prefix!r} in {owner}/{repo}")
+
+          best = max(matches, key=lambda a: (a.get("updated_at") or ""))
+          print(best["id"])
+          PY
+
+          ART_ID=$(tr -d '\r\n' < artifact_id.txt)
           if [ -z "$ART_ID" ] || [ "$ART_ID" = "null" ]; then
             echo "::error::No artifact found with prefix $PREFIX in $SOURCE_OWNER/$SOURCE_REPO"
             exit 1
           fi
 
-          curl -L -H "Authorization: Bearer $TOKEN" -o artifact.zip "https://api.github.com/repos/$SOURCE_OWNER/$SOURCE_REPO/actions/artifacts/$ART_ID/zip"
+          curl -fsSL \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -o artifact.zip \
+            "https://api.github.com/repos/$SOURCE_OWNER/$SOURCE_REPO/actions/artifacts/$ART_ID/zip"
+
           unzip -q artifact.zip -d artifact
 
       - name: Extract repos list from project-report.csv
@@ -97,7 +137,7 @@ jobs:
           fi
 
           python3 - "$CSV" "$MAX" <<'PY' > repos_to_star.txt
-          import csv, sys, re
+          import csv, re, sys
 
           csvfile = sys.argv[1]
           max_repos = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else 10
@@ -145,44 +185,23 @@ jobs:
       - name: Upload repos list artifact
         uses: actions/upload-artifact@v4
         with:
-          name: repos-to-star
+          name: repos-to-star-3
           path: repos_to_star.txt
 
   star:
     needs: prepare
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        account: [1, 2, 3, 4, 5, 6]
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Download repo list
         uses: actions/download-artifact@v4
         with:
-          name: repos-to-star
+          name: repos-to-star-3
           path: .
 
-      - name: Validate current account token
+      - name: Star repos using account 3 token
         env:
-          TOKEN: ${{ secrets[format('STAR_TOKEN_{0}', matrix.account)] }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::Missing secret STAR_TOKEN_${{ matrix.account }}"
-            exit 1
-          fi
-
-          USER_JSON=$(curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/user")
-          login=$(echo "$USER_JSON" | jq -r '.login // empty')
-          if [ -z "$login" ]; then
-            echo "::error::STAR_TOKEN_${{ matrix.account }} did not authenticate"
-            exit 1
-          fi
-          echo "Account #${{ matrix.account }} authenticated as: $login"
-
-      - name: Star repositories
-        env:
-          TOKEN: ${{ secrets[format('STAR_TOKEN_{0}', matrix.account)] }}
+          TOKEN: ${{ secrets.STAR_TOKEN_3 }}
           DRY: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -192,7 +211,7 @@ jobs:
             exit 1
           fi
 
-          echo "Starting star run for account #${{ matrix.account }}"
+          DRY_LOWER="${DRY,,}"
 
           while IFS= read -r R; do
             R=$(echo "$R" | tr -d '\r')
@@ -203,30 +222,42 @@ jobs:
               continue
             fi
 
-            echo "Repository: $R"
-
-            if [ "$DRY" = "true" ] || [ "$DRY" = "True" ]; then
+            if [ "$DRY_LOWER" = "true" ]; then
               echo "DRY RUN: would star $R"
               continue
             fi
 
-            STATUS=$(curl -s -o /tmp/star.out -w "%{http_code}" \
-              -X PUT \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/user/starred/$R" || echo "000")
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              STATUS=$(curl -sS -o /tmp/star.out -w "%{http_code}" \
+                -X PUT \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/user/starred/$R" || echo "000")
 
-            if [ "$STATUS" = "204" ] || [ "$STATUS" = "304" ]; then
-              echo "OK: $R"
-            elif [ "$STATUS" = "401" ] || [ "$STATUS" = "403" ]; then
-              echo "::error::Permission/auth error for $R (HTTP $STATUS)"
-              cat /tmp/star.out || true
-              exit 1
-            else
-              echo "WARNING: HTTP $STATUS for $R"
-              cat /tmp/star.out || true
-            fi
+              if [ "$STATUS" = "204" ] || [ "$STATUS" = "304" ]; then
+                echo "OK: $R"
+                break
+              fi
 
+              if [ "$STATUS" = "401" ] || [ "$STATUS" = "403" ]; then
+                echo "::warning::Permission/auth error for $R (HTTP $STATUS)"
+                cat /tmp/star.out || true
+                break
+              fi
+
+              if [ "$STATUS" = "429" ] || [ "$STATUS" = "500" ] || [ "$STATUS" = "502" ] || [ "$STATUS" = "503" ] || [ "$STATUS" = "504" ]; then
+                echo "::warning::Transient failure for $R (HTTP $STATUS), retry $attempt/3"
+                cat /tmp/star.out || true
+                sleep 5
+                attempt=$((attempt + 1))
+                continue
+              fi
+
+              echo "::warning::HTTP $STATUS for $R"
+              cat /tmp/star.out || true
+              break
+            done
           done < repos_to_star.txt
 
-          echo "Finished account #${{ matrix.account }}"
+          echo "Finished account 3 star run"
