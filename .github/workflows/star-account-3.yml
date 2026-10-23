@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 20
     env:
       TZ: Asia/Muscat
-      REPO_FILE: repos_to_star_3.txt
+      REPO_FILE: repos_to_star.txt
     steps:
       - name: Show current Oman time
         run: |
