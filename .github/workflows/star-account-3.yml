@@ -2,7 +2,7 @@ name: Star improved-spork reported repos - Account 3
 
 on:
   schedule:
-    - cron: '40 15 * * *'   # 7:40 PM Oman = 15:40 UTC
+    - cron: '35 16 * * *'   # Every day at 8:35 PM Oman = 16:35 UTC
   workflow_dispatch:
     inputs:
       source_owner:
@@ -34,7 +34,16 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      TZ: Asia/Muscat
+      REPO_FILE: repos_to_star_3.txt
     steps:
+      - name: Show current Oman time
+        run: |
+          echo "UTC: $(date -u)"
+          echo "Oman: $(date)"
+          echo "This workflow is scheduled for 8:45 PM Oman daily."
+
       - name: Install dependencies
         run: |
           sudo apt-get update -y
@@ -48,16 +57,19 @@ jobs:
             echo "::error::Missing secret STAR_TOKEN_3"
             exit 1
           fi
+
           USER_JSON=$(curl -sS \
             -H "Authorization: Bearer $TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/user")
+
           login=$(echo "$USER_JSON" | jq -r '.login // empty')
           if [ -z "$login" ]; then
             echo "::error::STAR_TOKEN_3 authentication failed."
             echo "$USER_JSON"
             exit 1
           fi
+
           echo "Artifact account: $login"
 
       - name: Download latest matching artifact zip from source repo
@@ -68,22 +80,32 @@ jobs:
           PREFIX: ${{ inputs.artifact_prefix || 'python-project-report' }}
         run: |
           set -euo pipefail
+
           SOURCE_OWNER="${SOURCE_OWNER:-Dippp10-ally}"
           SOURCE_REPO="${SOURCE_REPO:-improved-spork}"
           PREFIX="${PREFIX:-python-project-report}"
+
           mkdir -p artifact
+
           python3 - "$TOKEN" "$SOURCE_OWNER" "$SOURCE_REPO" "$PREFIX" > artifact_id.txt <<'PY'
           import json, sys, urllib.request
+
           token, owner, repo, prefix = sys.argv[1:5]
           page = 1
           artifacts = []
+
           while True:
               req = urllib.request.Request(
                   f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts?per_page=100&page={page}",
-                  headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "github-actions-workflow"},
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "github-actions-workflow"
+                  },
               )
               with urllib.request.urlopen(req, timeout=30) as resp:
                   payload = json.load(resp)
+
               items = payload.get("artifacts", [])
               if not items:
                   break
@@ -91,9 +113,11 @@ jobs:
               if len(items) < 100:
                   break
               page += 1
+
           matches = [a for a in artifacts if str(a.get("name", "")).startswith(prefix)]
           if not matches:
               raise SystemExit(f"No artifact found with prefix {prefix!r} in {owner}/{repo}")
+
           best = max(matches, key=lambda a: (a.get("updated_at") or ""))
           print(best["id"])
           PY
@@ -118,16 +142,19 @@ jobs:
         run: |
           set -euo pipefail
           MAX="${MAX:-10}"
+
           CSV=$(find artifact -type f -name 'project-report.csv' | head -n 1 || true)
           if [ -z "$CSV" ]; then
             echo "::error::project-report.csv not found in artifact"
             exit 1
           fi
 
-          python3 - "$CSV" "$MAX" <<'PY' > repos_to_star.txt
+          python3 - "$CSV" "$MAX" > "$REPO_FILE" <<'PY'
           import csv, sys
+
           csvfile = sys.argv[1]
           max_repos = int(sys.argv[2]) if len(sys.argv) > 2 else 10
+
           repos = []
           with open(csvfile, newline="", encoding="utf-8") as f:
               reader = csv.DictReader(f)
@@ -139,6 +166,7 @@ jobs:
                   if not repo or repo.startswith(("http://", "https://")):
                       continue
                   repos.append(repo)
+
           seen = set()
           out = []
           for repo in repos:
@@ -148,15 +176,18 @@ jobs:
               out.append(repo)
               if len(out) >= max_repos:
                   break
+
           for repo in out:
               print(repo)
           PY
 
-          if [ ! -s repos_to_star.txt ]; then
+          if [ ! -s "$REPO_FILE" ]; then
             echo "::warning::No repos found for account 3"
             exit 0
           fi
-          cat repos_to_star.txt
+
+          echo "Repos to star:"
+          cat "$REPO_FILE"
 
       - name: Star repositories
         env:
@@ -164,20 +195,24 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: |
           set -euo pipefail
-          if [ ! -f repos_to_star.txt ]; then
-            echo "::warning::repos_to_star.txt not found"
+
+          if [ ! -f "$REPO_FILE" ]; then
+            echo "::warning::$REPO_FILE not found"
             exit 0
           fi
+
           while IFS= read -r repo; do
             [ -z "$repo" ] && continue
+
             if [ "${DRY_RUN:-false}" = "true" ]; then
               echo "DRY RUN: would star $repo"
               continue
             fi
+
             echo "Starring $repo"
             curl -sS -X PUT \
               -H "Authorization: Bearer $TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -w "\nHTTP %{http_code}\n" \
               "https://api.github.com/user/starred/$repo"
-          done < repos_to_star.txt
+          done < "$REPO_FILE"
